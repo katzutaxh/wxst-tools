@@ -10,7 +10,7 @@
 #>
 
 # ============================== CONFIG ==============================
-$ApiBase         = "https://wxst-licenses.taxhriley.workers.dev"  # <-- set this after deploying the Worker
+$ApiBase         = "https://wxst-licenses.taxhriley.workers.dev"
 $ApiBase         = $ApiBase.TrimEnd('/')  # guards against a trailing slash breaking /activate routing
 $AppName         = "Wxst Tools"
 $LicenseDir      = Join-Path $env:LOCALAPPDATA "WxstTools"
@@ -39,6 +39,10 @@ try {
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $Esc = [char]27
+
+# Needed for DPAPI-based license cache encryption below - not loaded by
+# default in Windows PowerShell 5.1.
+Add-Type -AssemblyName System.Security
 
 function Write-Ansi($Text, $R, $G, $B, [switch]$NoNewline) {
     $seq = "$Esc[38;2;$R;$G;${B}m$Text$Esc[0m"
@@ -291,7 +295,12 @@ function Show-MainMenu($Hwid, $Label, $ExpiryUtcString, $MaskedKey) {
     while ($true) {
         $choice = Read-Host "wxst>"
         switch ($choice.Trim().ToUpper()) {
-            'Q' { return }
+            'Q' {
+                Write-Host ""
+                Write-Host "Closing Wxst Tools..."
+                Start-Sleep -Milliseconds 400
+                exit 0
+            }
             default { Write-Host "Not implemented yet." }
         }
     }
