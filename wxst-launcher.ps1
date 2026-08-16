@@ -10,7 +10,7 @@
 #>
 
 # ============================== CONFIG ==============================
-$ApiBase         = "https://wxst-licenses.taxhriley.workers.dev/"  # <-- set this after deploying the Worker
+$ApiBase         = "https://wxst-licenses.taxhriley.workers.dev"  # <-- set this after deploying the Worker
 $AppName         = "Wxst Tools"
 $LicenseDir      = Join-Path $env:LOCALAPPDATA "WxstTools"
 $LicenseFile     = Join-Path $LicenseDir "license.dat"
