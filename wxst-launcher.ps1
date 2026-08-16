@@ -11,6 +11,7 @@
 
 # ============================== CONFIG ==============================
 $ApiBase         = "https://wxst-licenses.taxhriley.workers.dev"  # <-- set this after deploying the Worker
+$ApiBase         = $ApiBase.TrimEnd('/')  # guards against a trailing slash breaking /activate routing
 $AppName         = "Wxst Tools"
 $LicenseDir      = Join-Path $env:LOCALAPPDATA "WxstTools"
 $LicenseFile     = Join-Path $LicenseDir "license.dat"
