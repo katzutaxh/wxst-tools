@@ -266,7 +266,7 @@ function Get-TimeLeftText($ExpiryUtcString) {
 
 # ============================ TOOL PLUG-IN POINTS ============================
 $VpnConnectionName   = ""                          # name of a Windows VPN connection (Settings > VPN) to drive with rasdial
-$PhoneVpnScript      = ""                          # path to your own script that talks to your phone (adb, tasker webhook, etc)
+$PhoneVpnScript      = "C:\Users\wxst\Documents\platform-tools-latest-windows\platform-tools"                          # path to your own script that talks to your phone (adb, tasker webhook, etc)
 
 function Invoke-ExternalScript($Path, $FriendlyName) {
     if (-not $Path -or -not (Test-Path $Path)) {
