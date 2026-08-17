@@ -266,7 +266,7 @@ function Get-TimeLeftText($ExpiryUtcString) {
 
 # ============================ TOOL PLUG-IN POINTS ============================
 $VpnConnectionName   = ""                          # name of a Windows VPN connection (Settings > VPN) to drive with rasdial
-$PhoneVpnScript      = "C:\Users\wxst\Documents\platform-tools-latest-windows\platform-tools"                          # path to your own script that talks to your phone (adb, tasker webhook, etc)
+$PhoneVpnScript      = ""                          # path to your own script that talks to your phone (adb, tasker webhook, etc)
 
 function Invoke-ExternalScript($Path, $FriendlyName) {
     if (-not $Path -or -not (Test-Path $Path)) {
@@ -496,7 +496,13 @@ function Get-AdbDeviceSerial {
     return $null
 }
 
+# Per-call Caller ID blocking toggle (*67). This hides YOUR OWN number
+# from the person you call (they see "Private"/"Blocked") - it does not
+# display a different/fake number, so it's not caller ID spoofing.
+$Global:CallerIdBlockEnabled = $false
+
 function Invoke-AndroidCall {
+    while ($true) {
     Clear-Host
     Write-AnsiColorName "=== Call via Connected Android Phone ===`n" 'white'
     Write-Host ""
@@ -526,49 +532,64 @@ function Invoke-AndroidCall {
     Write-AnsiColorName $serial 'gray'
     Write-Host "Battery      : " -NoNewline
     Write-AnsiColorName $battery 'gray'
+    Write-Host "Caller ID    : " -NoNewline
+    if ($Global:CallerIdBlockEnabled) { Write-AnsiColorName "BLOCKED (*67 will be dialed)" 'red' }
+    else { Write-AnsiColorName "Visible" 'green' }
     Write-Host ("-" * 40)
     Write-Host ""
+    Write-Host "[C] Call   [T] Toggle Caller ID block ($(if ($Global:CallerIdBlockEnabled) {'ON'} else {'OFF'}))   [B] Back"
+    $action = Read-Host "call>"
 
-    Write-AnsiColorName "[" 'white' -NoNewline
-    Write-AnsiColorName "+" 'green' -NoNewline
-    Write-AnsiColorName "] Phone Number: " 'white' -NoNewline
-    $number = Read-Host
-    if ([string]::IsNullOrWhiteSpace($number)) {
-        Write-AnsiColorName "No number entered." 'red'
-        Read-Host "`nPress Enter to return to the menu"
-        return
+    switch ($action.Trim().ToUpper()) {
+        'T' {
+            $Global:CallerIdBlockEnabled = -not $Global:CallerIdBlockEnabled
+        }
+        'B' { return }
+        'C' {
+            Write-AnsiColorName "[" 'white' -NoNewline
+            Write-AnsiColorName "+" 'green' -NoNewline
+            Write-AnsiColorName "] Phone Number: " 'white' -NoNewline
+            $number = Read-Host
+            if ([string]::IsNullOrWhiteSpace($number)) {
+                Write-AnsiColorName "No number entered." 'red'
+                Read-Host "`nPress Enter to return to the menu"
+                continue
+            }
+            $dialable = ($number -replace '[^\d\+]', '')
+            if ($Global:CallerIdBlockEnabled) { $dialable = "*67$dialable" }
+
+            Write-Host ""
+            Write-Host "Dialing $dialable from the connected phone..."
+            & $AdbPath -s $serial shell am start -a android.intent.action.CALL -d "tel:$dialable" | Out-Null
+
+            # Poll call state - OFFHOOK covers both "dialing" and "answered" since
+            # plain adb/dumpsys doesn't reliably distinguish the two without extra
+            # permissions, so treat this as "call is active", not strictly "answered".
+            Write-Host "Waiting for the call to connect (up to 30s)..."
+            $connected = $false
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            while ($sw.Elapsed.TotalSeconds -lt 30) {
+                $state = & $AdbPath -s $serial shell dumpsys telephony.registry 2>$null | Select-String "mCallState"
+                if ($state -match '=2' -or $state -match 'OFFHOOK') { $connected = $true; break }
+                Start-Sleep -Milliseconds 800
+            }
+
+            Write-Host ""
+            if ($connected) {
+                Write-AnsiColorName "[" 'white' -NoNewline
+                Write-AnsiColorName "+" 'green' -NoNewline
+                Write-AnsiColorName "] Connected`n" 'white'
+                Show-PhoneNumberInfo -PhoneNumber $number
+            } else {
+                Write-AnsiColorName "[!] " 'red' -NoNewline
+                Write-Host "Call state didn't confirm connected within 30s (may still be ringing on the phone)."
+                Show-PhoneNumberInfo -PhoneNumber $number
+            }
+            Write-Host ""
+            Read-Host "Press Enter to return to the menu"
+        }
     }
-    $dialable = ($number -replace '[^\d\+]', '')
-
-    Write-Host ""
-    Write-Host "Dialing $dialable from the connected phone..."
-    & $AdbPath -s $serial shell am start -a android.intent.action.CALL -d "tel:$dialable" | Out-Null
-
-    # Poll call state - OFFHOOK covers both "dialing" and "answered" since
-    # plain adb/dumpsys doesn't reliably distinguish the two without extra
-    # permissions, so treat this as "call is active", not strictly "answered".
-    Write-Host "Waiting for the call to connect (up to 30s)..."
-    $connected = $false
-    $sw = [Diagnostics.Stopwatch]::StartNew()
-    while ($sw.Elapsed.TotalSeconds -lt 30) {
-        $state = & $AdbPath -s $serial shell dumpsys telephony.registry 2>$null | Select-String "mCallState"
-        if ($state -match '=2' -or $state -match 'OFFHOOK') { $connected = $true; break }
-        Start-Sleep -Milliseconds 800
     }
-
-    Write-Host ""
-    if ($connected) {
-        Write-AnsiColorName "[" 'white' -NoNewline
-        Write-AnsiColorName "+" 'green' -NoNewline
-        Write-AnsiColorName "] Connected`n" 'white'
-        Show-PhoneNumberInfo -PhoneNumber $number
-    } else {
-        Write-AnsiColorName "[!] " 'red' -NoNewline
-        Write-Host "Call state didn't confirm connected within 30s (may still be ringing on the phone)."
-        Show-PhoneNumberInfo -PhoneNumber $number
-    }
-    Write-Host ""
-    Read-Host "Press Enter to return to the menu"
 }
 
 function Show-WoofingMenu {
