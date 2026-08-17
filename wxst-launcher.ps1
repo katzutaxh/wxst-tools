@@ -537,24 +537,20 @@ function Invoke-AndroidCall {
     else { Write-AnsiColorName "Visible" 'green' }
     Write-Host ("-" * 40)
     Write-Host ""
-    Write-Host "[C] Call   [T] Toggle Caller ID block ($(if ($Global:CallerIdBlockEnabled) {'ON'} else {'OFF'}))   [B] Back"
-    $action = Read-Host "call>"
+    Write-AnsiColorName "[" 'white' -NoNewline
+    Write-AnsiColorName "+" 'green' -NoNewline
+    Write-AnsiColorName "] Phone Number " 'white' -NoNewline
+    Write-Host "(or T = toggle Caller ID block, B = back): " -NoNewline
+    $action = Read-Host
 
     switch ($action.Trim().ToUpper()) {
         'T' {
             $Global:CallerIdBlockEnabled = -not $Global:CallerIdBlockEnabled
         }
         'B' { return }
-        'C' {
-            Write-AnsiColorName "[" 'white' -NoNewline
-            Write-AnsiColorName "+" 'green' -NoNewline
-            Write-AnsiColorName "] Phone Number: " 'white' -NoNewline
-            $number = Read-Host
-            if ([string]::IsNullOrWhiteSpace($number)) {
-                Write-AnsiColorName "No number entered." 'red'
-                Read-Host "`nPress Enter to return to the menu"
-                continue
-            }
+        '' { }
+        default {
+            $number = $action.Trim()
             $dialable = ($number -replace '[^\d\+]', '')
             if ($Global:CallerIdBlockEnabled) { $dialable = "*67$dialable" }
 
