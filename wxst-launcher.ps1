@@ -264,44 +264,503 @@ function Get-TimeLeftText($ExpiryUtcString) {
     return "{0}m remaining" -f [int]$remaining.TotalMinutes
 }
 
-function Show-MainMenu($Hwid, $Label, $ExpiryUtcString, $MaskedKey) {
-    Clear-Host
-    Show-Banner -Centered
-    Write-Host ""
-    $width = try { [Console]::WindowWidth } catch { 120 }
-    $lines = @(
-        "Username: $env:USERNAME@$env:COMPUTERNAME",
-        "License : $MaskedKey  ($Label)"
-    )
-    $timeLeft = Get-TimeLeftText $ExpiryUtcString
-    $lines += "Status  : $timeLeft"
+# ============================ TOOL PLUG-IN POINTS ============================
+$VpnConnectionName   = ""                          # name of a Windows VPN connection (Settings > VPN) to drive with rasdial
+$PhoneVpnScript      = ""                          # path to your own script that talks to your phone (adb, tasker webhook, etc)
 
-    foreach ($l in $lines) {
-        $pad = [Math]::Max(0, [int](($width - $l.Length) / 2))
-        Write-Host (' ' * $pad) -NoNewline
-        Write-Host $l
+function Invoke-ExternalScript($Path, $FriendlyName) {
+    if (-not $Path -or -not (Test-Path $Path)) {
+        Write-AnsiColorName "[!] " 'red' -NoNewline
+        Write-Host "$FriendlyName isn't configured yet. Set its path/script and try again."
+        return
+    }
+    Write-Host "Launching $FriendlyName..."
+    try {
+        & $Path
+    } catch {
+        Write-AnsiColorName "[!] " 'red' -NoNewline
+        Write-Host "Error running $FriendlyName`: $($_.Exception.Message)"
     }
     Write-Host ""
-    $menu = "----------------------------------------"
-    $pad = [Math]::Max(0, [int](($width - $menu.Length) / 2))
-    Write-Host (' ' * $pad) -NoNewline
-    Write-Host $menu
-    $opt = "[1] Options coming soon...   [Q] Quit"
-    $pad = [Math]::Max(0, [int](($width - $opt.Length) / 2))
-    Write-Host (' ' * $pad) -NoNewline
-    Write-Host $opt
+    Read-Host "Press Enter to return to the menu"
+}
+
+# ------------------------------ Section: Woofing ------------------------------
+function Invoke-VpnConnect {
+    if (-not $VpnConnectionName) {
+        Write-AnsiColorName "[!] " 'red' -NoNewline
+        Write-Host "No VPN connection configured. Set `$VpnConnectionName to a connection you've set up under Windows Settings > VPN."
+        return
+    }
+    Write-Host "Connecting to VPN '$VpnConnectionName'..."
+    rasdial "$VpnConnectionName"
+}
+
+function Invoke-VpnDisconnect {
+    if (-not $VpnConnectionName) { return }
+    rasdial "$VpnConnectionName" /disconnect
+}
+
+function Show-VpnMenu {
+    while ($true) {
+        Clear-Host
+        Write-AnsiColorName "=== VPN ===`n" 'white'
+        Write-Host "[1] Connect"
+        Write-Host "[2] Disconnect"
+        Write-Host "[B] Back"
+        $choice = Read-Host "vpn>"
+        switch ($choice.Trim().ToUpper()) {
+            '1' { Invoke-VpnConnect; Read-Host "Press Enter to continue" }
+            '2' { Invoke-VpnDisconnect; Read-Host "Press Enter to continue" }
+            'B' { return }
+        }
+    }
+}
+
+function Invoke-PhoneInfo {
+    Clear-Host
+    Write-AnsiColorName "=== Connected Phone Hardware Info ===`n" 'white'
     Write-Host ""
 
+    $PnPDevices = Get-CimInstance -ClassName Win32_PnPEntity | Where-Object {
+        $_.Service -match "winusb|wceusbsh|usbser|tsusbhub" -or
+        $_.Description -match "Phone|Mobile|Android|Modem|ADB" -or
+        $_.DeviceClass -match "Modem"
+    }
+
+    if ($PnPDevices) {
+        foreach ($Device in $PnPDevices) {
+            Write-Host "Device Name: " -NoNewline
+            Write-AnsiColorName $Device.Caption 'gray'
+            Write-Host "Status:      " -NoNewline
+            if ($Device.Status -eq "OK") {
+                Write-AnsiColorName $Device.Status 'green'
+            } else {
+                Write-AnsiColorName $Device.Status 'red'
+            }
+            Write-Host "Device ID:   " -NoNewline
+            Write-AnsiColorName $Device.DeviceID 'gray'
+            Write-Host ("-" * 40)
+        }
+    } else {
+        Write-AnsiColorName "No connected phone hardware or ADB interfaces detected via USB.`n" 'gray'
+        Write-Host ("-" * 40)
+    }
+
+    Write-Host ""
+    Write-AnsiColorName "[" 'white' -NoNewline
+    Write-AnsiColorName "+" 'green' -NoNewline
+    Write-AnsiColorName "] Phone Number: " 'white' -NoNewline
+    $PhoneNumber = Read-Host
+
+    if (-not [string]::IsNullOrWhiteSpace($PhoneNumber)) {
+        Write-Host ""
+        Write-AnsiColorName "[" 'white' -NoNewline
+        Write-AnsiColorName "+" 'green' -NoNewline
+        Write-AnsiColorName "] Connected`n" 'white'
+        Show-PhoneNumberInfo -PhoneNumber $PhoneNumber
+    } else {
+        Write-AnsiColorName "No phone number entered." 'red'
+    }
+    Write-Host ""
+    Read-Host "Press Enter to return to the menu"
+}
+
+# Best-effort, offline NANP area code -> region lookup. Not exhaustive,
+# and area codes can be reassigned/overlaid over time, so treat this as
+# a rough first signal, not a verified source. Set $PhoneLookupApiKey
+# below (numlookupapi.com, Twilio Lookup, etc.) for live carrier/line-
+# type data instead of just a rough region guess.
+$PhoneLookupApiKey = ""     # optional - leave blank to use offline area code lookup only
+$PhoneLookupApiUrl = ""     # e.g. "https://api.numlookupapi.com/v1/validate/{number}?apikey={key}"
+
+$AreaCodeMap = @{
+    '201'='NJ - Jersey City';'202'='DC - Washington';'203'='CT - Bridgeport';'205'='AL - Birmingham'
+    '206'='WA - Seattle';'207'='ME - Statewide';'208'='ID - Statewide';'209'='CA - Stockton'
+    '210'='TX - San Antonio';'212'='NY - Manhattan';'213'='CA - Los Angeles';'214'='TX - Dallas'
+    '215'='PA - Philadelphia';'216'='OH - Cleveland';'217'='IL - Springfield';'218'='MN - Duluth'
+    '219'='IN - Gary';'224'='IL - Chicago suburbs';'225'='LA - Baton Rouge';'228'='MS - Gulfport'
+    '229'='GA - Albany';'231'='MI - Traverse City';'234'='OH - Akron';'239'='FL - Fort Myers'
+    '240'='MD - Suburban DC';'248'='MI - Troy';'251'='AL - Mobile';'252'='NC - Rocky Mount'
+    '253'='WA - Tacoma';'254'='TX - Waco';'256'='AL - Huntsville';'260'='IN - Fort Wayne'
+    '262'='WI - Kenosha';'267'='PA - Philadelphia';'269'='MI - Kalamazoo';'270'='KY - Bowling Green'
+    '276'='VA - Bristol';'281'='TX - Houston';'301'='MD - Suburban DC';'302'='DE - Statewide'
+    '303'='CO - Denver';'304'='WV - Statewide';'305'='FL - Miami';'307'='WY - Statewide'
+    '308'='NE - North Platte';'309'='IL - Peoria';'310'='CA - Los Angeles (West)';'312'='IL - Chicago'
+    '313'='MI - Detroit';'314'='MO - St. Louis';'315'='NY - Syracuse';'316'='KS - Wichita'
+    '317'='IN - Indianapolis';'318'='LA - Shreveport';'319'='IA - Cedar Rapids';'320'='MN - St. Cloud'
+    '321'='FL - Orlando';'323'='CA - Los Angeles';'325'='TX - Abilene';'330'='OH - Akron'
+    '334'='AL - Montgomery';'336'='NC - Greensboro';'337'='LA - Lafayette';'339'='MA - Boston area'
+    '340'='USVI';'347'='NY - NYC boroughs';'351'='MA - Lowell';'352'='FL - Gainesville'
+    '360'='WA - Vancouver';'361'='TX - Corpus Christi';'385'='UT - Salt Lake City';'386'='FL - Daytona Beach'
+    '401'='RI - Statewide';'402'='NE - Omaha';'404'='GA - Atlanta';'405'='OK - Oklahoma City'
+    '406'='MT - Statewide';'407'='FL - Orlando';'408'='CA - San Jose';'409'='TX - Beaumont'
+    '410'='MD - Baltimore';'412'='PA - Pittsburgh';'413'='MA - Springfield';'414'='WI - Milwaukee'
+    '415'='CA - San Francisco';'417'='MO - Springfield';'419'='OH - Toledo';'423'='TN - Chattanooga'
+    '424'='CA - Los Angeles';'425'='WA - Bellevue';'432'='TX - Midland';'434'='VA - Lynchburg'
+    '435'='UT - St. George';'440'='OH - Cleveland suburbs';'443'='MD - Baltimore';'458'='OR - Eugene'
+    '469'='TX - Dallas';'470'='GA - Atlanta';'475'='CT - New Haven';'478'='GA - Macon'
+    '479'='AR - Fayetteville';'480'='AZ - Scottsdale';'484'='PA - Allentown';'501'='AR - Little Rock'
+    '502'='KY - Louisville';'503'='OR - Portland';'504'='LA - New Orleans';'505'='NM - Albuquerque'
+    '507'='MN - Rochester';'508'='MA - Worcester';'509'='WA - Spokane';'510'='CA - Oakland'
+    '512'='TX - Austin';'513'='OH - Cincinnati';'515'='IA - Des Moines';'516'='NY - Long Island'
+    '517'='MI - Lansing';'518'='NY - Albany';'520'='AZ - Tucson';'530'='CA - Redding'
+    '540'='VA - Roanoke';'541'='OR - Eugene';'551'='NJ - Jersey City';'559'='CA - Fresno'
+    '561'='FL - West Palm Beach';'562'='CA - Long Beach';'563'='IA - Davenport';'570'='PA - Scranton'
+    '571'='VA - Suburban DC';'573'='MO - Columbia';'574'='IN - South Bend';'575'='NM - Las Cruces'
+    '580'='OK - Lawton';'585'='NY - Rochester';'586'='MI - Warren';'601'='MS - Jackson'
+    '602'='AZ - Phoenix';'603'='NH - Statewide';'605'='SD - Statewide';'606'='KY - Ashland'
+    '607'='NY - Binghamton';'608'='WI - Madison';'609'='NJ - Trenton';'610'='PA - Allentown'
+    '612'='MN - Minneapolis';'614'='OH - Columbus';'615'='TN - Nashville';'616'='MI - Grand Rapids'
+    '617'='MA - Boston';'618'='IL - Belleville';'619'='CA - San Diego';'620'='KS - Hutchinson'
+    '623'='AZ - Phoenix (West)';'626'='CA - Pasadena';'628'='CA - San Francisco';'629'='TN - Nashville'
+    '630'='IL - Naperville';'631'='NY - Suffolk County';'636'='MO - St. Charles';'641'='IA - Mason City'
+    '646'='NY - Manhattan';'650'='CA - San Mateo';'651'='MN - St. Paul';'657'='CA - Anaheim'
+    '660'='MO - Sedalia';'661'='CA - Bakersfield';'662'='MS - Tupelo';'667'='MD - Baltimore'
+    '669'='CA - San Jose';'678'='GA - Atlanta';'682'='TX - Fort Worth';'701'='ND - Statewide'
+    '702'='NV - Las Vegas';'703'='VA - Suburban DC';'704'='NC - Charlotte';'706'='GA - Columbus'
+    '707'='CA - Santa Rosa';'708'='IL - Cicero';'712'='IA - Sioux City';'713'='TX - Houston'
+    '714'='CA - Anaheim';'715'='WI - Eau Claire';'716'='NY - Buffalo';'717'='PA - Harrisburg'
+    '718'='NY - NYC boroughs';'719'='CO - Colorado Springs';'720'='CO - Denver';'724'='PA - New Castle'
+    '725'='NV - Las Vegas';'727'='FL - St. Petersburg';'731'='TN - Jackson';'732'='NJ - New Brunswick'
+    '734'='MI - Ann Arbor';'737'='TX - Austin';'740'='OH - Zanesville';'747'='CA - Burbank'
+    '754'='FL - Fort Lauderdale';'757'='VA - Norfolk';'760'='CA - Oceanside';'762'='GA - Augusta'
+    '763'='MN - Minneapolis suburbs';'765'='IN - Muncie';'770'='GA - Atlanta suburbs';'772'='FL - Port St. Lucie'
+    '773'='IL - Chicago';'774'='MA - Worcester';'775'='NV - Reno';'781'='MA - Boston suburbs'
+    '785'='KS - Topeka';'786'='FL - Miami';'801'='UT - Salt Lake City';'802'='VT - Statewide'
+    '803'='SC - Columbia';'804'='VA - Richmond';'805'='CA - Ventura';'806'='TX - Amarillo'
+    '808'='HI - Statewide';'810'='MI - Flint';'812'='IN - Evansville';'813'='FL - Tampa'
+    '814'='PA - Erie';'815'='IL - Rockford';'816'='MO - Kansas City';'817'='TX - Fort Worth'
+    '818'='CA - San Fernando Valley';'828'='NC - Asheville';'830'='TX - New Braunfels';'831'='CA - Salinas'
+    '832'='TX - Houston';'843'='SC - Charleston';'845'='NY - Poughkeepsie';'847'='IL - Evanston'
+    '848'='NJ - New Brunswick';'850'='FL - Tallahassee';'854'='SC - Charleston';'856'='NJ - Camden'
+    '857'='MA - Boston';'858'='CA - San Diego';'859'='KY - Lexington';'860'='CT - Hartford'
+    '862'='NJ - Newark';'863'='FL - Lakeland';'864'='SC - Greenville';'865'='TN - Knoxville'
+    '870'='AR - Jonesboro';'872'='IL - Chicago';'878'='PA - Pittsburgh';'901'='TN - Memphis'
+    '903'='TX - Tyler';'904'='FL - Jacksonville';'906'='MI - Upper Peninsula';'907'='AK - Statewide'
+    '908'='NJ - Elizabeth';'909'='CA - San Bernardino';'910'='NC - Fayetteville';'912'='GA - Savannah'
+    '913'='KS - Kansas City (KS)';'914'='NY - Westchester';'915'='TX - El Paso';'916'='CA - Sacramento'
+    '917'='NY - NYC mobile';'918'='OK - Tulsa';'919'='NC - Raleigh';'920'='WI - Green Bay'
+    '925'='CA - Concord';'928'='AZ - Flagstaff';'929'='NY - NYC boroughs';'930'='IN - Evansville'
+    '931'='TN - Clarksville';'936'='TX - Conroe';'937'='OH - Dayton';'940'='TX - Wichita Falls'
+    '941'='FL - Sarasota';'947'='MI - Troy';'949'='CA - Irvine';'951'='CA - Riverside'
+    '952'='MN - Bloomington';'954'='FL - Fort Lauderdale';'956'='TX - Laredo';'959'='CT - Hartford'
+    '970'='CO - Fort Collins';'971'='OR - Portland';'972'='TX - Dallas';'973'='NJ - Newark'
+    '978'='MA - Lowell';'979'='TX - Bryan';'980'='NC - Charlotte';'984'='NC - Raleigh'
+    '985'='LA - Houma';'989'='MI - Saginaw'
+    '403'='AB - Calgary';'416'='ON - Toronto';'438'='QC - Montreal';'514'='QC - Montreal'
+    '604'='BC - Vancouver';'613'='ON - Ottawa';'647'='ON - Toronto';'778'='BC - Vancouver'
+    '780'='AB - Edmonton';'902'='NS/PEI - Halifax';'905'='ON - Toronto suburbs'
+}
+
+function Show-PhoneNumberInfo($PhoneNumber) {
+    $digits = ($PhoneNumber -replace '[^\d]', '')
+    if ($digits.Length -eq 11 -and $digits.StartsWith('1')) { $digits = $digits.Substring(1) }
+
+    if ($PhoneLookupApiUrl -and $PhoneLookupApiKey) {
+        try {
+            $url = $PhoneLookupApiUrl -replace '\{number\}', $digits -replace '\{key\}', $PhoneLookupApiKey
+            $r = Invoke-RestMethod -Uri $url -ErrorAction Stop
+            Write-Host ($r | ConvertTo-Json -Depth 4)
+            return
+        } catch {
+            Write-AnsiColorName "[!] " 'red' -NoNewline
+            Write-Host "Live lookup failed, falling back to offline area code guess."
+        }
+    }
+
+    if ($digits.Length -ge 3) {
+        $areaCode = $digits.Substring(0, 3)
+        if ($AreaCodeMap.ContainsKey($areaCode)) {
+            Write-Host "Area code $areaCode is typically registered to: " -NoNewline
+            Write-AnsiColorName $AreaCodeMap[$areaCode] 'green'
+        } else {
+            Write-AnsiColorName "Area code $areaCode isn't in the offline lookup table." 'gray'
+        }
+    } else {
+        Write-AnsiColorName "Number too short to identify an area code." 'red'
+    }
+    Write-AnsiColorName "`nNote: area code = rough origin of the *number*, not proof of the caller's real location - spoofed caller ID is common with scam calls, so treat this as one signal, not confirmation." 'gray'
+}
+
+function Show-WoofingMenu {
     while ($true) {
+        Clear-Host
+        Write-AnsiColorName "=== Woofing ===`n" 'white'
+        Write-Host "[1] VPN"
+        Write-Host "[2] Phone VPN"
+        Write-Host "[3] Phone Hardware Info"
+        Write-Host "[B] Back"
+        $choice = Read-Host "woofing>"
+        switch ($choice.Trim().ToUpper()) {
+            '1' { Show-VpnMenu }
+            '2' { Invoke-ExternalScript -Path $PhoneVpnScript -FriendlyName "Phone VPN" }
+            '3' { Invoke-PhoneInfo }
+            'B' { return }
+        }
+    }
+}
+
+# ------------------------------ Section 3: IP Tools ------------------------------
+function Invoke-IpCleaner {
+    Write-Host "Flushing DNS cache..."
+    ipconfig /flushdns | Out-Null
+    Write-Host "Releasing IP..."
+    ipconfig /release | Out-Null
+    Write-Host "Renewing IP..."
+    ipconfig /renew | Out-Null
+    Write-AnsiColorName "[+] " 'green' -NoNewline
+    Write-Host "Done."
+}
+
+function Invoke-IpGeolocation {
+    $target = Read-Host "IP address to look up (blank = your own public IP)"
+    try {
+        $url = if ($target) { "http://ip-api.com/json/$target" } else { "http://ip-api.com/json/" }
+        $r = Invoke-RestMethod -Uri $url -ErrorAction Stop
+        if ($r.status -eq 'fail') {
+            Write-AnsiColorName "[!] " 'red' -NoNewline
+            Write-Host $r.message
+        } else {
+            Write-Host "IP      : $($r.query)"
+            Write-Host "City    : $($r.city)"
+            Write-Host "Region  : $($r.regionName)"
+            Write-Host "Country : $($r.country)"
+            Write-Host "ISP     : $($r.isp)"
+            Write-Host "Org     : $($r.org)"
+            Write-Host "Lat/Lon : $($r.lat), $($r.lon)"
+        }
+    } catch {
+        Write-AnsiColorName "[!] " 'red' -NoNewline
+        Write-Host "Lookup failed: $($_.Exception.Message)"
+    }
+}
+
+function Invoke-ReverseIp {
+    $target = Read-Host "IP address to reverse-lookup (find other domains on it)"
+    if (-not $target) { return }
+    try {
+        $r = Invoke-RestMethod -Uri "https://api.hackertarget.com/reverseiplookup/?q=$target" -ErrorAction Stop
+        Write-Host $r
+    } catch {
+        Write-AnsiColorName "[!] " 'red' -NoNewline
+        Write-Host "Lookup failed: $($_.Exception.Message)"
+    }
+}
+
+function Invoke-ReverseDns {
+    $target = Read-Host "IP address to reverse-DNS"
+    if (-not $target) { return }
+    try {
+        $entry = [System.Net.Dns]::GetHostEntry($target)
+        Write-Host "Hostname: $($entry.HostName)"
+    } catch {
+        Write-AnsiColorName "[!] " 'red' -NoNewline
+        Write-Host "No PTR record found / lookup failed."
+    }
+}
+
+function Show-IpToolsMenu {
+    while ($true) {
+        Clear-Host
+        Write-AnsiColorName "=== IP Tools ===`n" 'white'
+        Write-Host "[1] IP Cleaner (flush DNS + renew IP)"
+        Write-Host "[2] IP Geolocation"
+        Write-Host "[3] Reverse IP"
+        Write-Host "[4] Reverse DNS"
+        Write-Host "[B] Back"
+        $choice = Read-Host "iptools>"
+        switch ($choice.Trim().ToUpper()) {
+            '1' { Invoke-IpCleaner; Read-Host "`nPress Enter to continue" }
+            '2' { Invoke-IpGeolocation; Read-Host "`nPress Enter to continue" }
+            '3' { Invoke-ReverseIp; Read-Host "`nPress Enter to continue" }
+            '4' { Invoke-ReverseDns; Read-Host "`nPress Enter to continue" }
+            'B' { return }
+        }
+    }
+}
+
+# ------------------------------ Section: Misc ------------------------------
+function Invoke-WhoisLookup {
+    $target = Read-Host "Domain to WHOIS"
+    if (-not $target) { return }
+    try {
+        $r = Invoke-RestMethod -Uri "https://api.hackertarget.com/whois/?q=$target" -ErrorAction Stop
+        Write-Host $r
+    } catch {
+        Write-AnsiColorName "[!] " 'red' -NoNewline
+        Write-Host "Lookup failed: $($_.Exception.Message)"
+    }
+}
+
+function Invoke-DnsRecordLookup {
+    $target = Read-Host "Domain to look up DNS records for"
+    if (-not $target) { return }
+    foreach ($type in @('A', 'AAAA', 'MX', 'NS', 'TXT')) {
+        try {
+            $records = Resolve-DnsName -Name $target -Type $type -ErrorAction Stop
+            foreach ($rec in $records) {
+                Write-Host "$type : $($rec | Select-Object -ExpandProperty * -ErrorAction SilentlyContinue | Out-String)".Trim()
+            }
+        } catch { }
+    }
+}
+
+function Invoke-RemoteDesktop {
+    Write-AnsiColorName "=== Remote Desktop Connection ===`n" 'white'
+    $ip   = Read-Host "Remote IP or hostname"
+    if (-not $ip) { return }
+    $user = Read-Host "Username"
+    $securePass = Read-Host "Password" -AsSecureString
+    $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePass)
+    $plainPass = [Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
+
+    try {
+        cmdkey /generic:$ip /user:$user /pass:$plainPass | Out-Null
+        Write-Host "Connecting to $ip..."
+        Start-Process mstsc -ArgumentList "/v:$ip" -Wait
+    } finally {
+        # Don't leave the credential sitting in Windows Credential Manager
+        cmdkey /delete:$ip | Out-Null
+        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+        $plainPass = $null
+    }
+}
+
+# ---- Network device scan (discovery only - see note below) ----
+# Actively disconnecting or throttling another device on the network
+# from a regular PC requires ARP spoofing / deauth techniques - the
+# same technique used for unauthorized network attacks, so that's not
+# included here regardless of which device it'd be pointed at. If your
+# router exposes a real local admin API (many do), a script that logs
+# in with YOUR OWN router admin credentials and calls its legitimate
+# device-blocking/QoS feature is a completely different, buildable
+# thing - tell me the router brand/model and I can look at that.
+function Invoke-NetworkScan {
+    Write-AnsiColorName "=== Network Device Scan ===`n" 'white'
+    Write-Host "Scanning local subnet (this populates the ARP table, may take a few seconds)..."
+
+    $localIp = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+        Where-Object { $_.InterfaceAlias -notmatch 'Loopback' -and $_.IPAddress -notlike '169.254*' } |
+        Select-Object -First 1).IPAddress
+    if (-not $localIp) {
+        Write-AnsiColorName "[!] " 'red' -NoNewline
+        Write-Host "Couldn't determine your local IP/subnet."
+        return
+    }
+    $prefix = ($localIp -split '\.')[0..2] -join '.'
+
+    $jobs = 1..254 | ForEach-Object {
+        Start-Job -ScriptBlock { param($p, $i) Test-Connection -ComputerName "$p.$i" -Count 1 -Quiet -TimeoutSeconds 1 } -ArgumentList $prefix, $_
+    }
+    $jobs | Wait-Job -Timeout 20 | Out-Null
+    $jobs | Remove-Job -Force -ErrorAction SilentlyContinue
+
+    $arp = arp -a | Select-String "$prefix\." | ForEach-Object {
+        $parts = ($_ -replace '\s+', ' ').Trim().Split(' ')
+        if ($parts.Count -ge 2) { [PSCustomObject]@{ IP = $parts[0]; MAC = $parts[1] } }
+    } | Where-Object { $_.MAC -match '-' } | Sort-Object IP -Unique
+
+    if (-not $arp) {
+        Write-AnsiColorName "No devices found." 'gray'
+        return
+    }
+
+    $devices = @()
+    $i = 1
+    foreach ($d in $arp) {
+        $hostname = try { ([System.Net.Dns]::GetHostEntry($d.IP)).HostName } catch { "" }
+        $devices += [PSCustomObject]@{ Index = $i; IP = $d.IP; MAC = $d.MAC; Hostname = $hostname }
+        $i++
+    }
+
+    $devices | ForEach-Object {
+        Write-Host "[$($_.Index)] $($_.IP)  $($_.MAC)  $($_.Hostname)"
+    }
+    Write-Host ""
+    $choice = Read-Host "Select a device number for details (or Enter to skip)"
+    $idx = 0
+    if ([int]::TryParse($choice, [ref]$idx)) {
+        $selected = $devices | Where-Object { $_.Index -eq $idx }
+        if ($selected) {
+            Write-Host ""
+            Write-Host "IP       : $($selected.IP)"
+            Write-Host "MAC      : $($selected.MAC)"
+            Write-Host "Hostname : $($selected.Hostname)"
+            Write-Host ""
+            Write-AnsiColorName "Disconnect / throttle isn't available from here - see the note in the script for why, and use your router's device management / parental controls for that.`n" 'gray'
+        }
+    }
+}
+
+function Show-MiscMenu {
+    while ($true) {
+        Clear-Host
+        Write-AnsiColorName "=== Misc ===`n" 'white'
+        Write-Host "[1] WHOIS Lookup"
+        Write-Host "[2] DNS Record Lookup"
+        Write-Host "[3] Remote Desktop Connection"
+        Write-Host "[4] Scan Network Devices"
+        Write-Host "[B] Back"
+        $choice = Read-Host "misc>"
+        switch ($choice.Trim().ToUpper()) {
+            '1' { Invoke-WhoisLookup; Read-Host "`nPress Enter to continue" }
+            '2' { Invoke-DnsRecordLookup; Read-Host "`nPress Enter to continue" }
+            '3' { Invoke-RemoteDesktop; Read-Host "`nPress Enter to continue" }
+            '4' { Invoke-NetworkScan; Read-Host "`nPress Enter to continue" }
+            'B' { return }
+        }
+    }
+}
+
+function Show-MainMenu($Hwid, $Label, $ExpiryUtcString, $MaskedKey) {
+    while ($true) {
+        Clear-Host
+        Show-Banner -Centered
+        Write-Host ""
+        $width = try { [Console]::WindowWidth } catch { 120 }
+        $lines = @(
+            "Username: $env:USERNAME@$env:COMPUTERNAME",
+            "License : $MaskedKey  ($Label)"
+        )
+        $timeLeft = Get-TimeLeftText $ExpiryUtcString
+        $lines += "Status  : $timeLeft"
+
+        foreach ($l in $lines) {
+            $pad = [Math]::Max(0, [int](($width - $l.Length) / 2))
+            Write-Host (' ' * $pad) -NoNewline
+            Write-Host $l
+        }
+        Write-Host ""
+        $menu = "----------------------------------------"
+        $pad = [Math]::Max(0, [int](($width - $menu.Length) / 2))
+        Write-Host (' ' * $pad) -NoNewline
+        Write-Host $menu
+        $opts = @(
+            "[1] Woofing",
+            "[2] IP Tools",
+            "[3] Misc",
+            "[Q] Quit"
+        )
+        foreach ($o in $opts) {
+            $pad = [Math]::Max(0, [int](($width - $o.Length) / 2))
+            Write-Host (' ' * $pad) -NoNewline
+            Write-Host $o
+        }
+        Write-Host ""
+
         $choice = Read-Host "wxst>"
         switch ($choice.Trim().ToUpper()) {
+            '1' { Show-WoofingMenu }
+            '2' { Show-IpToolsMenu }
+            '3' { Show-MiscMenu }
             'Q' {
                 Write-Host ""
                 Write-Host "Closing Wxst Tools..."
                 Start-Sleep -Milliseconds 400
                 exit 0
             }
-            default { Write-Host "Not implemented yet." }
+            default { Write-Host "Unknown option." }
         }
     }
 }
