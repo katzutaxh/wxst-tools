@@ -483,6 +483,94 @@ function Show-PhoneNumberInfo($PhoneNumber) {
     Write-AnsiColorName "`nNote: area code = rough origin of the *number*, not proof of the caller's real location - spoofed caller ID is common with scam calls, so treat this as one signal, not confirmation." 'gray'
 }
 
+# ---- Place a call from a USB-connected Android phone via ADB ----
+# Requires: USB debugging enabled on the phone, ADB authorized for
+# this PC, and platform-tools' adb.exe reachable (set $AdbPath if it's
+# not on your system PATH).
+$AdbPath = "adb"
+
+function Get-AdbDeviceSerial {
+    $out = & $AdbPath devices 2>$null
+    $line = $out | Select-Object -Skip 1 | Where-Object { $_ -match "\tdevice$" } | Select-Object -First 1
+    if ($line) { return ($line -split "`t")[0] }
+    return $null
+}
+
+function Invoke-AndroidCall {
+    Clear-Host
+    Write-AnsiColorName "=== Call via Connected Android Phone ===`n" 'white'
+    Write-Host ""
+
+    if (-not (Get-Command $AdbPath -ErrorAction SilentlyContinue)) {
+        Write-AnsiColorName "[!] " 'red' -NoNewline
+        Write-Host "adb not found. Install Android platform-tools and make sure adb.exe is on PATH (or set `$AdbPath)."
+        Read-Host "Press Enter to return to the menu"
+        return
+    }
+
+    $serial = Get-AdbDeviceSerial
+    if (-not $serial) {
+        Write-AnsiColorName "[!] " 'red' -NoNewline
+        Write-Host "No authorized ADB device found. Plug in your phone, enable USB debugging, and accept the RSA prompt on the phone screen."
+        Read-Host "Press Enter to return to the menu"
+        return
+    }
+
+    $model = (& $AdbPath -s $serial shell getprop ro.product.model 2>$null).Trim()
+    $manufacturer = (& $AdbPath -s $serial shell getprop ro.product.manufacturer 2>$null).Trim()
+    $battery = (& $AdbPath -s $serial shell dumpsys battery 2>$null | Select-String "level").ToString().Trim()
+
+    Write-Host "Device       : " -NoNewline
+    Write-AnsiColorName "$manufacturer $model" 'gray'
+    Write-Host "Serial       : " -NoNewline
+    Write-AnsiColorName $serial 'gray'
+    Write-Host "Battery      : " -NoNewline
+    Write-AnsiColorName $battery 'gray'
+    Write-Host ("-" * 40)
+    Write-Host ""
+
+    Write-AnsiColorName "[" 'white' -NoNewline
+    Write-AnsiColorName "+" 'green' -NoNewline
+    Write-AnsiColorName "] Phone Number: " 'white' -NoNewline
+    $number = Read-Host
+    if ([string]::IsNullOrWhiteSpace($number)) {
+        Write-AnsiColorName "No number entered." 'red'
+        Read-Host "`nPress Enter to return to the menu"
+        return
+    }
+    $dialable = ($number -replace '[^\d\+]', '')
+
+    Write-Host ""
+    Write-Host "Dialing $dialable from the connected phone..."
+    & $AdbPath -s $serial shell am start -a android.intent.action.CALL -d "tel:$dialable" | Out-Null
+
+    # Poll call state - OFFHOOK covers both "dialing" and "answered" since
+    # plain adb/dumpsys doesn't reliably distinguish the two without extra
+    # permissions, so treat this as "call is active", not strictly "answered".
+    Write-Host "Waiting for the call to connect (up to 30s)..."
+    $connected = $false
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    while ($sw.Elapsed.TotalSeconds -lt 30) {
+        $state = & $AdbPath -s $serial shell dumpsys telephony.registry 2>$null | Select-String "mCallState"
+        if ($state -match '=2' -or $state -match 'OFFHOOK') { $connected = $true; break }
+        Start-Sleep -Milliseconds 800
+    }
+
+    Write-Host ""
+    if ($connected) {
+        Write-AnsiColorName "[" 'white' -NoNewline
+        Write-AnsiColorName "+" 'green' -NoNewline
+        Write-AnsiColorName "] Connected`n" 'white'
+        Show-PhoneNumberInfo -PhoneNumber $number
+    } else {
+        Write-AnsiColorName "[!] " 'red' -NoNewline
+        Write-Host "Call state didn't confirm connected within 30s (may still be ringing on the phone)."
+        Show-PhoneNumberInfo -PhoneNumber $number
+    }
+    Write-Host ""
+    Read-Host "Press Enter to return to the menu"
+}
+
 function Show-WoofingMenu {
     while ($true) {
         Clear-Host
@@ -490,12 +578,14 @@ function Show-WoofingMenu {
         Write-Host "[1] VPN"
         Write-Host "[2] Phone VPN"
         Write-Host "[3] Phone Hardware Info"
+        Write-Host "[4] Call (Android via ADB)"
         Write-Host "[B] Back"
         $choice = Read-Host "woofing>"
         switch ($choice.Trim().ToUpper()) {
             '1' { Show-VpnMenu }
             '2' { Invoke-ExternalScript -Path $PhoneVpnScript -FriendlyName "Phone VPN" }
             '3' { Invoke-PhoneInfo }
+            '4' { Invoke-AndroidCall }
             'B' { return }
         }
     }
